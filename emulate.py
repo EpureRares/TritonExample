@@ -5,6 +5,7 @@ import string
 import logging
 import argparse
 import sys
+import gdb
 
 Triton = TritonContext()
 
@@ -33,6 +34,26 @@ class Tracer:
 		blocksFound: Set[int] = set()
 		basicBlocksPathFoundThisRun = []
 
+		def restoreContext():
+			Triton.setConcreteRegisterValue(Triton.registers.rax, int(gdb.parse_and_eval('$rax')))
+			Triton.setConcreteRegisterValue(Triton.registers.rbx, int(gdb.parse_and_eval('$rbx')))
+			Triton.setConcreteRegisterValue(Triton.registers.rcx, int(gdb.parse_and_eval('$rcx')))
+			Triton.setConcreteRegisterValue(Triton.registers.rdx, int(gdb.parse_and_eval('$rdx')))
+			Triton.setConcreteRegisterValue(Triton.registers.rsp, int(gdb.parse_and_eval('$rsp')))
+			Triton.setConcreteRegisterValue(Triton.registers.rbp, int(gdb.parse_and_eval('$rbp')))
+			Triton.setConcreteRegisterValue(Triton.registers.rdi, int(gdb.parse_and_eval('$rdi')))
+			Triton.setConcreteRegisterValue(Triton.registers.rsi, int(gdb.parse_and_eval('$rsi')))
+			Triton.setConcreteRegisterValue(Triton.registers.r8, int(gdb.parse_and_eval('$r8')))
+			Triton.setConcreteRegisterValue(Triton.registers.r9, int(gdb.parse_and_eval('$r9')))
+			Triton.setConcreteRegisterValue(Triton.registers.r10, int(gdb.parse_and_eval('$r10')))
+			Triton.setConcreteRegisterValue(Triton.registers.r11, int(gdb.parse_and_eval('$r11')))
+			Triton.setConcreteRegisterValue(Triton.registers.r12, int(gdb.parse_and_eval('$r12')))
+			Triton.setConcreteRegisterValue(Triton.registers.r13, int(gdb.parse_and_eval('$r13')))
+			Triton.setConcreteRegisterValue(Triton.registers.r14, int(gdb.parse_and_eval('$r14')))
+			Triton.setConcreteRegisterValue(Triton.registers.r15, int(gdb.parse_and_eval('$r15')))
+			Triton.setConcreteRegisterValue(Triton.registers.rip, int(gdb.parse_and_eval('$rip')))
+			Triton.setConcreteRegisterValue(Triton.registers.eflags, int(gdb.parse_and_eval('$eflags')))
+
 		def onBasicBlockFound(addr):
 			nonlocal numNewBasicBlocks
 			nonlocal newBasicBlocksFound
@@ -50,30 +71,45 @@ class Tracer:
 
 		logging.info('[+] Starting emulation.')
 		while pc:
-			print(f" pc = {hex(pc)}")
+			print(f"pc = {hex(pc)}")
 
 			# Fetch opcode
 			opcode = Triton.getConcreteMemoryAreaValue(pc, 16)
-
+			print("RIP register")
+			# print(f"{(gdb.parse_and_eval('$rip'))} = {hex(int(gdb.parse_and_eval('$rip')))}")
+			# pc = (int(gdb.parse_and_eval('$rip')))
 			# Create the ctx instruction
 			instruction = Instruction()
 			instruction.setOpcode(opcode)
 			instruction.setAddress(pc)
-
 			# Process
+
 			Triton.processing(instruction)
-			print(instruction)
+			print("Instruction: "+ str(instruction))
 			logging.info(instruction)
 
 			# Next
 			prevpc = pc
 			pc = Triton.getConcreteRegisterValue(Triton.registers.rip)
+			
+			if prevpc == pc:
+				pc += 4;
 
-			if instruction.isControlFlow():
-				currentBBlockAddr = pc
-				onBasicBlockFound(currentBBlockAddr)
-				logging.info(f"Instruction is control flow of type {instruction.getType()}. Addr of the new Basic block {hex(currentBBlockAddr)}")
+			if not ((pc >= 0x7ffff7dbe000 and pc <= 0x7ffff7fac000) or pc <= 0x5000):
+				gdb.execute("nexti")
+				pc = (int(gdb.parse_and_eval('$rip')))
+				restoreContext()
+			else:
+				gdb.execute("stepi")
 
+				if instruction.isControlFlow():
+					if pc >= 0x5000:
+						pc = (int(gdb.parse_and_eval('$rip')))
+						restoreContext()
+					currentBBlockAddr = pc
+					onBasicBlockFound(currentBBlockAddr)
+					logging.info(f"Instruction is control flow of type {instruction.getType()}. Addr of the new Basic block {hex(currentBBlockAddr)}")
+			print("---------------------------")
 		logging.info('[+] Emulation done.')
 
 		if basicBlocksPathFoundThisRun[-1] == 0: # ret instruction
@@ -84,7 +120,7 @@ class Tracer:
 	@staticmethod
 	def loadBinary(tracersInstances, binaryPath, entryfuncName):
 		outEntryFuncAddr = None
-
+		gdb.execute("start");
 		logging.info(f"Loading the binary at path {binaryPath}..")
 		import lief
 		binary = lief.parse(binaryPath)
@@ -122,7 +158,15 @@ class Tracer:
 		import lief
 
 		libc = lief.parse("/lib/x86_64-linux-gnu/libc.so.6")
+		libld = lief.parse("/lib64/ld-linux-x86-64.so.2")
 		phdrs  = libc.segments
+		for phdr in phdrs:
+			size = phdr.physical_size
+			vaddr  = BASE_LIBC + phdr.virtual_address
+			print('Loading 0x%06x - 0x%06x' %(vaddr, vaddr+size))
+			Triton.setConcreteMemoryAreaValue(vaddr, phdr.content)
+
+		phdrs  = libld.segments
 		for phdr in phdrs:
 			size = phdr.physical_size
 			vaddr  = BASE_LIBC + phdr.virtual_address
@@ -157,7 +201,7 @@ BASE_PLT   = 0x10000000
 BASE_ARGV  = 0x20000000
 BASE_ALLOC = 0x30000000
 
-BASE_LIBC  = 0x7ffff7dbf000
+BASE_LIBC  = 0x7ffff7dbe000
 
 BASE_STACK = 0x9fffffff
 
@@ -176,10 +220,10 @@ if __name__ == '__main__':
     # Set a symbolic optimization mode
     Triton.setMode(MODE.ALIGNED_MEMORY, True)
     
-    args = parseArgs()
+    # args = parseArgs()
 
     # Load the binary info into the given list of tracers. We do this strage API to load only once the binary...
-    binary, entryPoint = Tracer.loadBinary(Triton, args.binaryPath, "main")
+    binary, entryPoint = Tracer.loadBinary(Triton, "example", "main")
 
     # Define a fake stack
     Triton.setConcreteRegisterValue(Triton.registers.rbp, BASE_STACK)
